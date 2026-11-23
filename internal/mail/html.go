@@ -18,60 +18,75 @@ var (
 )
 
 func visibleHTML(raw []byte) string {
-	root, err := html.Parse(bytes.NewReader(raw))
-	if err != nil {
-		return ""
-	}
-
+	tokens := html.NewTokenizer(bytes.NewReader(raw))
 	var text strings.Builder
-	appendVisible(&text, root)
+	var suppressed string
+	depth := 0
+	for kind := tokens.Next(); kind != html.ErrorToken; kind = tokens.Next() {
+		switch kind { //nolint:exhaustive // Only text and element tokens can contribute visible content.
+		case html.StartTagToken, html.SelfClosingTagToken:
+			tag := tokens.Token()
+			switch {
+			case suppressed != "":
+				if tag.Data == suppressed {
+					depth++
+				}
+			case hidden(tag):
+				if !voidElement(tag.Data) {
+					suppressed, depth = tag.Data, 1
+				}
+			default:
+				blockBreak(&text, tag.Data)
+			}
+		case html.EndTagToken:
+			name, _ := tokens.TagName()
+			switch {
+			case suppressed == "":
+				blockBreak(&text, string(name))
+			case string(name) == suppressed:
+				depth--
+				if depth == 0 {
+					suppressed = ""
+				}
+			}
+		case html.TextToken:
+			if suppressed == "" {
+				text.Write(tokens.Text())
+			}
+		default:
+			// Comments and declarations have no visible text.
+		}
+	}
 
 	return strings.TrimSpace(text.String())
 }
 
-func appendVisible(text *strings.Builder, node *html.Node) {
-	if node.Type == html.CommentNode {
-		return
-	}
-
-	if node.Type == html.TextNode {
-		text.WriteString(node.Data)
-
-		return
-	}
-
-	if node.Type == html.ElementNode && hidden(node) {
-		return
-	}
-
-	block := false
-
-	switch node.Data {
+func blockBreak(text *strings.Builder, name string) {
+	switch name {
 	case "br", "p", "div", "section", "article", "blockquote", "li", "tr", "pre",
 		"h1", "h2", "h3", "h4", "h5", "h6":
-		block = node.Type == html.ElementNode
-	}
-
-	if block && text.Len() != 0 {
-		text.WriteByte('\n')
-	}
-
-	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		appendVisible(text, child)
-	}
-
-	if block && text.Len() != 0 {
-		text.WriteByte('\n')
+		if text.Len() > 0 {
+			text.WriteByte('\n')
+		}
 	}
 }
 
-func hidden(node *html.Node) bool {
-	switch node.Data {
+func voidElement(name string) bool {
+	switch name {
+	case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+		"param", "source", "track", "wbr":
+		return true
+	default:
+		return false
+	}
+}
+
+func hidden(tag html.Token) bool {
+	switch tag.Data {
 	case "script", "style", "head", "title", "template", "noscript", "iframe", "svg", "math":
 		return true
 	}
-
-	for _, attr := range node.Attr {
+	for _, attr := range tag.Attr {
 		if attr.Key == "hidden" || (attr.Key == "style" && hiddenStyle(attr.Val)) {
 			return true
 		}

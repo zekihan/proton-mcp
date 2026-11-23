@@ -22,7 +22,7 @@ import (
 const htmlEmail = "From: sender@example.com\r\nTo: owner@example.com\r\n" +
 	"Subject: Example HTML\r\nMessage-ID: <fixture@example.com>\r\n" +
 	"Content-Type: text/html; charset=UTF-8\r\n\r\n" +
-	"<head><title>HIDDEN-TITLE</title><style>HIDDEN-STYLE</style></head>" +
+	"<head>HIDDEN-HEAD<title>HIDDEN-TITLE</title><style>HIDDEN-STYLE</style></head>" +
 	"<body>Hello<!-- HIDDEN-COMMENT --><script>HIDDEN-SCRIPT</script>" +
 	"<p hidden>HIDDEN-ATTR</p><p style='d\\69splay: N/**/ONE !important'>HIDDEN-DISPLAY</p>" +
 	"<p style='visibility:hidden'>HIDDEN-VISIBILITY</p><p style='font-size:0px'>HIDDEN-SIZE</p>" +
