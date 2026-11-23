@@ -2,7 +2,7 @@ package mail
 
 import (
 	"bytes"
-	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -11,54 +11,62 @@ import (
 	"golang.org/x/net/html"
 )
 
-var (
-	cssComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	cssEscape  = regexp.MustCompile(`\\(?:[0-9a-fA-F]{1,6}[\t\n\f\r ]?|[^\n\r\f])`)
-	cssZero    = regexp.MustCompile(`^[+-]?(?:0+(?:\.0*)?|\.0+)(?:[a-z]+|%)?$`)
-)
+type visibleElement struct {
+	name   string
+	colors inlineColors
+}
 
 func visibleHTML(raw []byte) string {
 	tokens := html.NewTokenizer(bytes.NewReader(raw))
 	var text strings.Builder
-	var suppressed string
-	depth := 0
+	var ancestors []visibleElement
 	for kind := tokens.Next(); kind != html.ErrorToken; kind = tokens.Next() {
 		switch kind { //nolint:exhaustive // Only text and element tokens can contribute visible content.
 		case html.StartTagToken, html.SelfClosingTagToken:
 			tag := tokens.Token()
-			switch {
-			case suppressed != "":
-				if tag.Data == suppressed {
-					depth++
-				}
-			case hidden(tag):
+			element, omit := inspectElement(tag, ancestors)
+			if omit {
 				if !voidElement(tag.Data) {
-					suppressed, depth = tag.Data, 1
+					skipElement(tokens, tag.Data)
 				}
-			default:
-				blockBreak(&text, tag.Data)
+
+				continue
 			}
+			if !voidElement(tag.Data) {
+				ancestors = append(ancestors, element)
+			}
+			blockBreak(&text, tag.Data)
 		case html.EndTagToken:
 			name, _ := tokens.TagName()
-			switch {
-			case suppressed == "":
-				blockBreak(&text, string(name))
-			case string(name) == suppressed:
-				depth--
-				if depth == 0 {
-					suppressed = ""
-				}
-			}
+			ancestors = closeVisible(ancestors, string(name))
+			blockBreak(&text, string(name))
 		case html.TextToken:
-			if suppressed == "" {
-				text.Write(tokens.Text())
-			}
+			text.Write(tokens.Text())
 		default:
 			// Comments and declarations have no visible text.
 		}
 	}
 
 	return strings.TrimSpace(text.String())
+}
+
+func skipElement(tokens *html.Tokenizer, element string) {
+	depth := 1
+	for depth > 0 {
+		kind := tokens.Next()
+		if kind == html.ErrorToken {
+			return
+		}
+		name, _ := tokens.TagName()
+		if string(name) != element {
+			continue
+		}
+		if kind == html.EndTagToken {
+			depth--
+		} else {
+			depth++
+		}
+	}
 }
 
 func blockBreak(text *strings.Builder, name string) {
@@ -81,40 +89,58 @@ func voidElement(name string) bool {
 	}
 }
 
-func hidden(tag html.Token) bool {
-	switch tag.Data {
-	case "script", "style", "head", "title", "template", "noscript", "iframe", "svg", "math":
-		return true
+func inspectElement(tag html.Token, ancestors []visibleElement) (visibleElement, bool) {
+	values := elementStyle(tag)
+	var colors inlineColors
+	if len(ancestors) > 0 {
+		colors = ancestors[len(ancestors)-1].colors
 	}
-	for _, attr := range tag.Attr {
-		if attr.Key == "hidden" || (attr.Key == "style" && hiddenStyle(attr.Val)) {
-			return true
+	colors = colors.apply(values)
+	omit := hidden(tag) || hiddenStyle(values) ||
+		(colors.color != "" && colors.color == colors.background)
+
+	return visibleElement{name: tag.Data, colors: colors}, omit
+}
+
+func closeVisible(ancestors []visibleElement, name string) []visibleElement {
+	for i, element := range slices.Backward(ancestors) {
+		if element.name == name {
+			return ancestors[:i]
 		}
 	}
 
-	return false
+	return ancestors
 }
 
-func hiddenStyle(style string) bool {
-	style = cssEscape.ReplaceAllStringFunc(cssComment.ReplaceAllString(style, ""), decodeCSSEscape)
-	for declaration := range strings.SplitSeq(strings.ToLower(style), ";") {
-		key, value, _ := strings.Cut(declaration, ":")
-		value, _, _ = strings.Cut(value, "!")
+func elementStyle(tag html.Token) map[string]string {
+	for _, attr := range tag.Attr {
+		if attr.Key == "style" {
+			return declarations(attr.Val)
+		}
+	}
 
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		switch key {
-		case "display":
-			if value == "none" {
-				return true
-			}
-		case "visibility":
-			if value == "hidden" || value == "collapse" {
-				return true
-			}
-		case "font-size", "opacity":
-			if cssZero.MatchString(value) {
-				return true
-			}
+	return nil
+}
+
+func hidden(tag html.Token) bool {
+	switch tag.Data {
+	case "script",
+		"style",
+		"head",
+		"title",
+		"template",
+		"noscript",
+		"iframe",
+		"svg",
+		"math",
+		"meta",
+		"link":
+		return true
+	}
+	for _, attr := range tag.Attr {
+		if attr.Key == "hidden" ||
+			(attr.Key == "aria-hidden" && strings.EqualFold(strings.TrimSpace(attr.Val), "true")) {
+			return true
 		}
 	}
 
