@@ -36,7 +36,46 @@ func Open(ctx context.Context, path string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("initialize SQLite: %w", closeAfterError(db, err))
 	}
 
+	err = migrateActions(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("migrate actions: %w", closeAfterError(db, err))
+	}
+
 	return db, nil
+}
+
+func migrateActions(ctx context.Context, db *sqlx.DB) error {
+	var version int
+	err := db.GetContext(ctx, &version, "PRAGMA user_version")
+	if err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= 1 {
+		return nil
+	}
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+  ALTER TABLE actions ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE actions ADD COLUMN execution_started INTEGER NOT NULL DEFAULT 0;
+  UPDATE actions SET execution_started=1 WHERE claimed=1;
+  UPDATE actions SET expires_at=0 WHERE status='stalled';
+  PRAGMA user_version = 1;
+ `)
+	if err != nil {
+		//nolint:errcheck // The original migration error is returned.
+		_ = tx.Rollback()
+
+		return fmt.Errorf("add action execution flags: %w", err)
+	}
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("commit migration: %w", err)
+	}
+
+	return nil
 }
 
 func closeAfterError(db *sqlx.DB, cause error) error {

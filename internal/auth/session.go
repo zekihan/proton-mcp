@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-type identityKey struct{}
+type (
+	identityKey     struct{}
+	renewedTokenKey struct{}
+)
 
 type IdentityInfo struct {
 	Name    *string
@@ -21,20 +24,41 @@ type IdentityInfo struct {
 	Subject string
 }
 
-func CSRF(r *http.Request) string {
+func requestToken(r *http.Request) string {
 	cookie, err := r.Cookie(sessionCookie)
-	if err != nil || cookie.Value == "" {
+	if err != nil {
 		return ""
 	}
 
-	return tokenHash("csrf:" + cookie.Value)
+	return cookie.Value
+}
+
+func sessionToken(r *http.Request) string {
+	if token, ok := r.Context().Value(renewedTokenKey{}).(string); ok {
+		return token
+	}
+
+	return requestToken(r)
+}
+
+func CSRF(r *http.Request) string {
+	token := sessionToken(r)
+	if token == "" {
+		return ""
+	}
+
+	return tokenHash("csrf:" + token)
 }
 
 func ValidCSRF(r *http.Request) bool {
-	expected := CSRF(r)
+	// The submitted form belongs to the token that authenticated this request.
+	token := requestToken(r)
 
-	return expected != "" &&
-		subtle.ConstantTimeCompare([]byte(expected), []byte(r.PostForm.Get("csrf"))) == 1
+	return token != "" &&
+		subtle.ConstantTimeCompare(
+			[]byte(tokenHash("csrf:"+token)),
+			[]byte(r.PostForm.Get("csrf")),
+		) == 1
 }
 
 func (svc *Service) isOwner(issuer, subject string) bool {
@@ -79,13 +103,10 @@ func (svc *Service) LogoutHandler() http.Handler {
 			return
 		}
 
-		cookie, err := r.Cookie(sessionCookie)
-		if err == nil && cookie.Value != "" {
-			_, err = svc.db.ExecContext(r.Context(), "DELETE FROM sessions WHERE token_hash = ?",
-				tokenHash(cookie.Value))
-			if err != nil {
-				slog.ErrorContext(r.Context(), "Could not delete session on sign-out")
-			}
+		_, err := svc.db.ExecContext(r.Context(), "DELETE FROM sessions WHERE token_hash = ?",
+			tokenHash(sessionToken(r)))
+		if err != nil {
+			slog.ErrorContext(r.Context(), "Could not delete session on sign-out")
 		}
 
 		svc.setCookie(w, sessionCookie, "/", "", -1)
@@ -132,16 +153,19 @@ func (svc *Service) RequireSession(next http.Handler) http.Handler {
 		}
 
 		if renewed < timestamp(now.Add(-renewalInterval)) {
-			didRenew, err := svc.renewSession(ctx, now, hash, renewed)
-			if err != nil {
+			token, renewErr := svc.renewSession(ctx, now, hash, renewed)
+			if renewErr != nil {
 				sessionError(w)
 
 				return
 			}
+			if token == "" {
+				requireSignIn(w, r)
 
-			if didRenew {
-				svc.setCookie(w, sessionCookie, "/", cookie.Value, int(sessionLifetime/time.Second))
+				return
 			}
+			svc.setCookie(w, sessionCookie, "/", token, int(sessionLifetime/time.Second))
+			ctx = context.WithValue(ctx, renewedTokenKey{}, token)
 		}
 
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, identityKey{}, me)))
@@ -152,23 +176,34 @@ func (svc *Service) renewSession(
 	ctx context.Context,
 	now time.Time,
 	hash, renewed string,
-) (bool, error) {
-	// Match the observed renewal so concurrent requests extend the session only once.
-	result, err := svc.db.ExecContext(ctx, `
-		UPDATE sessions SET renewed_at = ?, expires_at = ?
-		WHERE token_hash = ? AND renewed_at = ? AND expires_at > ?`,
-		timestamp(now), timestamp(now.Add(sessionLifetime)), hash, renewed, timestamp(now),
+) (string, error) {
+	token := randomToken()
+	result, err := svc.db.ExecContext(
+		ctx,
+		`
+  UPDATE sessions SET token_hash = ?, renewed_at = ?, expires_at = ?
+  WHERE token_hash = ? AND renewed_at = ? AND expires_at > ?`,
+		tokenHash(
+			token,
+		),
+		timestamp(now),
+		timestamp(now.Add(sessionLifetime)),
+		hash,
+		renewed,
+		timestamp(now),
 	)
 	if err != nil {
-		return false, fmt.Errorf("renew session: %w", err)
+		return "", fmt.Errorf("renew session: %w", err)
 	}
-
 	count, err := result.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("count renewed sessions: %w", err)
+		return "", fmt.Errorf("count renewed sessions: %w", err)
+	}
+	if count != 1 {
+		return "", nil
 	}
 
-	return count == 1, nil
+	return token, nil
 }
 
 func requireSignIn(w http.ResponseWriter, r *http.Request) {

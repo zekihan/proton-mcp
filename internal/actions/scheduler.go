@@ -21,17 +21,39 @@ const interrupted = "Execution was interrupted. Verify the mailbox before making
 
 // Recover runs once before serving HTTP or starting the scheduler.
 func (svc *Service) Recover(ctx context.Context, started time.Time) error {
-	err := svc.reconcile(ctx, Queued, mutation{
-		status: Failed, detail: interrupted, condition: "claimed = 1",
+	err := svc.restoreStalledDeadlines(ctx, started)
+	if err != nil {
+		return err
+	}
+	err = svc.reconcile(ctx, Queued, mutation{
+		status: Failed, detail: interrupted, condition: "claimed = 1 AND execution_started=1",
 	})
 	if err != nil {
 		return err
 	}
 
 	return svc.reconcile(ctx, Queued, mutation{
-		status: Stalled, condition: "claimed = 0 AND run_at < ?",
+		status: Stalled, condition: "execution_started=0 AND run_at < ?",
 		args: []any{started.UnixNano()},
 	})
+}
+
+func (svc *Service) restoreStalledDeadlines(ctx context.Context, started time.Time) error {
+	// Earlier databases recorded the stall in the audit table without assigning a deadline.
+	_, err := svc.DB.ExecContext(ctx, `
+  UPDATE actions SET expires_at=COALESCE(
+   (SELECT MAX(at) FROM audit
+    WHERE json_extract(event, '$.id')=actions.id
+      AND json_extract(event, '$.action')=actions.kind
+      AND json_extract(event, '$.status')='stalled'),
+   ?
+  ) + ?
+  WHERE status=? AND expires_at=0`, started.UnixNano(), svc.TTL.Nanoseconds(), Stalled)
+	if err != nil {
+		return fmt.Errorf("restore stalled approval deadlines: %w", err)
+	}
+
+	return nil
 }
 
 func (svc *Service) reconcile(ctx context.Context, current string, change mutation) error {
@@ -97,11 +119,13 @@ func (svc *Service) Run(ctx context.Context) {
 
 func (svc *Service) Tick(ctx context.Context) error {
 	now := time.Now().UnixNano()
-	err := svc.reconcile(ctx, Pending, mutation{
-		status: Expired, condition: "expires_at <= ?", args: []any{now},
-	})
-	if err != nil {
-		return err
+	for _, status := range []string{Pending, Stalled} {
+		err := svc.reconcile(ctx, status, mutation{
+			status: Expired, condition: "expires_at <= ?", args: []any{now},
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	ids, err := svc.matching(ctx, Queued, "claimed=0 AND run_at<=?", now)
@@ -133,6 +157,7 @@ func (svc *Service) runAction(ctx context.Context, id string, dueAt int64) error
 		return nil
 	}
 
+	snapshot, snapshotErr := row.snapshot()
 	err = svc.transition(ctx, &row, mutation{
 		status: Queued, runAt: row.RunAt, claim: true,
 		condition: "claimed=0 AND run_at<=?", args: []any{dueAt},
@@ -146,36 +171,43 @@ func (svc *Service) runAction(ctx context.Context, id string, dueAt int64) error
 	}
 
 	row.Claimed = true
-	opCtx, stop := context.WithTimeout(ctx, executionTimeout)
-	status, detail := svc.execute(opCtx, &row)
-
-	stop()
+	status, detail := Failed, ErrIntegrity.Error()
+	if snapshotErr == nil {
+		opCtx, stop := context.WithTimeout(ctx, executionTimeout)
+		status, detail = svc.execute(opCtx, &row, &snapshot)
+		stop()
+	}
 
 	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeTimeout)
 	defer cancel()
 
-	return svc.transition(finalizeCtx, &row, mutation{
+	err = svc.transition(finalizeCtx, &row, mutation{
 		status: status, detail: detail, condition: "claimed=1",
 	})
-}
-
-func (svc *Service) execute(ctx context.Context, row *record) (string, string) {
-	snapshot, err := row.snapshot()
-	if err != nil {
-		return Failed, ErrIntegrity.Error()
+	if errors.Is(err, ErrConflict) {
+		current, readErr := svc.get(finalizeCtx, id)
+		if readErr == nil && current.Status == Cancelled {
+			return nil
+		}
 	}
 
+	return err
+}
+
+func (svc *Service) execute(ctx context.Context, row *record, snapshot *Snapshot) (string, string) {
+	event := row.snapshotEvent("execution_started", snapshot)
+	beforeWrite := func() error { return svc.beginExecution(ctx, row, event) }
 	switch row.Kind {
 	case SendDraft, Forward:
-		return svc.send(ctx, row.Kind, &snapshot)
+		return svc.send(ctx, row.Kind, snapshot, beforeWrite)
 	case Delete:
 		uids := make([]uint32, 0, len(snapshot.Messages))
 		for _, msg := range snapshot.Messages {
 			uids = append(uids, msg.UID)
 		}
 
-		err = svc.Bridge.Expunge(ctx, snapshot.Location.Folder, snapshot.Location.Validity,
-			uids, true)
+		err := svc.Bridge.Expunge(ctx, snapshot.Location.Folder, snapshot.Location.Validity,
+			uids, true, beforeWrite)
 		if err != nil {
 			return Failed, "Permanent deletion could not be confirmed."
 		}
@@ -186,8 +218,13 @@ func (svc *Service) execute(ctx context.Context, row *record) (string, string) {
 	}
 }
 
-func (svc *Service) send(ctx context.Context, kind string, snapshot *Snapshot) (string, string) {
-	err := svc.Bridge.Send(ctx, snapshot.Raw)
+func (svc *Service) send(
+	ctx context.Context,
+	kind string,
+	snapshot *Snapshot,
+	beforeWrite func() error,
+) (string, string) {
+	err := svc.Bridge.Send(ctx, snapshot.Raw, beforeWrite)
 	if err != nil {
 		if errors.Is(err, mail.ErrDeliveryUnknown) {
 			return Failed, mail.ErrDeliveryUnknown.Error() + ". Verify Sent before requesting again."

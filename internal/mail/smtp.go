@@ -10,7 +10,7 @@ import (
 
 var ErrDeliveryUnknown = errors.New("SMTP acceptance could not be confirmed")
 
-func (bridge *Bridge) Send(ctx context.Context, raw []byte) error {
+func (bridge *Bridge) Send(ctx context.Context, raw []byte, beforeWrite func() error) error {
 	envelope, err := SMTPEnvelope(raw)
 	if err != nil {
 		return err
@@ -22,6 +22,10 @@ func (bridge *Bridge) Send(ctx context.Context, raw []byte) error {
 	}
 	defer closeBridge()
 
+	err = beforeWrite()
+	if err != nil {
+		return err
+	}
 	err = client.SendMail(
 		envelope.From,
 		envelope.Recipients,

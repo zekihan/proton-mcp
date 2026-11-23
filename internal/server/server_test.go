@@ -328,7 +328,7 @@ func TestRestartStallsOverdueAndNeverReplaysClaimed(t *testing.T) {
 	fx.due(t, action.ID)
 	_, err := fx.service.DB.ExecContext(
 		t.Context(),
-		"UPDATE actions SET claimed=1 WHERE id=?",
+		"UPDATE actions SET claimed=1, execution_started=1 WHERE id=?",
 		other.ID,
 	)
 	requireNoError(t, err)

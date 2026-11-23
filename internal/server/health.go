@@ -10,7 +10,10 @@ import (
 	"github.com/zekihan/proton-mcp/internal/actions"
 )
 
+const healthBudget = 5 * time.Second
+
 type health struct {
+	flight *healthFlight
 	until  time.Time
 	svc    *actions.Service
 	ttl    time.Duration
@@ -61,21 +64,67 @@ func (health *health) databaseOK(ctx context.Context) bool {
 		available == 1
 }
 
+type healthFlight struct {
+	done   chan struct{}
+	result healthResult
+}
+
 func (health *health) probe(ctx context.Context) healthResult {
 	health.mu.Lock()
-	defer health.mu.Unlock()
-
 	if time.Now().Before(health.until) {
-		return health.result
-	}
-	// A disconnected probe caller should not poison the shared result.
-	ctx = context.WithoutCancel(ctx)
-	health.result = healthResult{
-		DB:   check(ctx, health.databaseOK),
-		IMAP: check(ctx, health.svc.Bridge.ProbeIMAP),
-		SMTP: check(ctx, health.svc.Bridge.ProbeSMTP),
-	}
-	health.until = time.Now().Add(health.ttl)
+		cached := health.result
+		health.mu.Unlock()
 
-	return health.result
+		return cached
+	}
+	flight := health.flight
+	if flight == nil {
+		flight = &healthFlight{done: make(chan struct{})}
+		health.flight = flight
+		go health.runProbe(context.WithoutCancel(ctx), flight)
+	}
+	health.mu.Unlock()
+
+	select {
+	case <-flight.done:
+		return flight.result
+	case <-ctx.Done():
+		return healthResult{}
+	}
+}
+
+func (health *health) runProbe(ctx context.Context, flight *healthFlight) {
+	ctx, cancel := context.WithTimeout(ctx, healthBudget)
+	defer cancel()
+
+	db := startProbe(ctx, health.databaseOK)
+	imap := startProbe(ctx, health.svc.Bridge.ProbeIMAP)
+	smtp := startProbe(ctx, health.svc.Bridge.ProbeSMTP)
+	result := healthResult{
+		DB: probeResult(ctx, db), IMAP: probeResult(ctx, imap), SMTP: probeResult(ctx, smtp),
+	}
+
+	health.mu.Lock()
+	health.result = result
+	health.until = time.Now().Add(health.ttl)
+	health.flight = nil
+	flight.result = result
+	close(flight.done)
+	health.mu.Unlock()
+}
+
+func startProbe(ctx context.Context, probe func(context.Context) bool) <-chan bool {
+	result := make(chan bool, 1)
+	go func() { result <- check(ctx, probe) }()
+
+	return result
+}
+
+func probeResult(ctx context.Context, result <-chan bool) bool {
+	select {
+	case ok := <-result:
+		return ok
+	case <-ctx.Done():
+		return false
+	}
 }

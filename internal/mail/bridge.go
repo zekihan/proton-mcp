@@ -21,6 +21,7 @@ var (
 	ErrBridge   = errors.New("Bridge operation failed")
 	ErrNotFound = errors.New("message or folder not found")
 	ErrUnsafe   = errors.New("operation cannot be performed safely")
+	ErrUIDLimit = errors.New("uids must contain at most 100 entries")
 	ErrInput    = errors.New("invalid mail arguments")
 	ErrTooLarge = errors.New("message exceeds the supported size")
 )

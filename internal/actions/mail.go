@@ -122,7 +122,7 @@ func (svc *Service) removeOldDraft(ctx context.Context, old, latest mail.Locatio
 }
 
 func (svc *Service) expungeDraft(ctx context.Context, loc mail.Location) error {
-	err := svc.Bridge.Expunge(ctx, loc.Folder, loc.Validity, []uint32{loc.UID}, false)
+	err := svc.Bridge.Expunge(ctx, loc.Folder, loc.Validity, []uint32{loc.UID}, false, nil)
 	if err != nil {
 		return err
 	}

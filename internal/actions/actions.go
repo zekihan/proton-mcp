@@ -38,6 +38,7 @@ const (
 
 var (
 	ErrConflict  = errors.New("action is no longer available for this operation")
+	ErrTooLate   = errors.New("too late to cancel")
 	ErrIntegrity = errors.New("action snapshot failed its integrity check")
 )
 
@@ -70,25 +71,26 @@ type Action struct {
 }
 
 type record struct {
-	ID       string `db:"id"`
-	Kind     string `db:"kind"`
-	Status   string `db:"status"`
-	Digest   string `db:"digest"`
-	Detail   string `db:"detail"`
-	Snapshot []byte `db:"snapshot"`
-	Expires  int64  `db:"expires_at"`
-	RunAt    int64  `db:"run_at"`
-	Claimed  bool   `db:"claimed"`
+	ID               string `db:"id"`
+	Kind             string `db:"kind"`
+	Status           string `db:"status"`
+	Digest           string `db:"digest"`
+	Detail           string `db:"detail"`
+	Snapshot         []byte `db:"snapshot"`
+	Expires          int64  `db:"expires_at"`
+	RunAt            int64  `db:"run_at"`
+	Claimed          bool   `db:"claimed"`
+	ExecutionStarted bool   `db:"execution_started"`
 }
 
 func (row *record) action() Action {
 	action := Action{ID: row.ID, Kind: row.Kind, Status: row.Status, Detail: row.Detail}
-	if row.RunAt != 0 && row.Status == Queued && !row.Claimed {
+	if row.RunAt != 0 && row.Status == Queued && !row.ExecutionStarted {
 		runAt := time.Unix(0, row.RunAt).UTC()
 		action.RunAt = &runAt
 	}
 
-	if row.Claimed {
+	if row.ExecutionStarted && row.Status == Queued {
 		action.Detail = "Execution has started."
 	}
 
@@ -127,6 +129,11 @@ func (row *record) event(status string) store.Event {
 		return event
 	}
 
+	return row.snapshotEvent(status, &snapshot)
+}
+
+func (row *record) snapshotEvent(status string, snapshot *Snapshot) store.Event {
+	event := store.Event{Action: row.Kind, ID: row.ID, Status: status}
 	event.Folder, event.Recipients = snapshot.Location.Folder, snapshot.Recipients
 	if snapshot.Location.UID != 0 {
 		event.UIDs = []uint32{snapshot.Location.UID}
@@ -164,12 +171,15 @@ func (svc *Service) Review(ctx context.Context, id string) (Action, Snapshot, st
 }
 
 func (svc *Service) Decide(ctx context.Context, id, decision, reviewedDigest string) error {
+	if decision == "cancel" {
+		return svc.cancel(ctx, id)
+	}
 	row, err := svc.lookup(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	next, err := svc.decision(&row, decision, reviewedDigest)
+	next, err := reviewDecision(&row, decision, reviewedDigest)
 	if err != nil {
 		return err
 	}
@@ -230,7 +240,7 @@ func (svc *Service) lookup(ctx context.Context, id string) (record, error) {
 	}
 
 	now := time.Now().UnixNano()
-	if row.Status == Pending && row.Expires <= now {
+	if awaitingApproval(row.Status) && row.Expires <= now {
 		err = svc.transition(ctx, &row, mutation{
 			status: Expired, condition: "expires_at <= ?", args: []any{now},
 		})
@@ -245,12 +255,16 @@ func (svc *Service) lookup(ctx context.Context, id string) (record, error) {
 }
 
 func (svc *Service) get(ctx context.Context, id string) (record, error) {
-	var row record
+	return getRecord(ctx, svc.DB, id)
+}
 
-	err := svc.DB.GetContext(
+func getRecord(ctx context.Context, queryer sqlx.QueryerContext, id string) (record, error) {
+	var row record
+	err := sqlx.GetContext(
 		ctx,
+		queryer,
 		&row,
-		`SELECT id,kind,status,expires_at,run_at,claimed,snapshot,digest,detail FROM actions WHERE id=?`,
+		`SELECT id,kind,status,expires_at,run_at,claimed,snapshot,digest,detail,execution_started FROM actions WHERE id=?`,
 		id,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -264,19 +278,18 @@ func (svc *Service) get(ctx context.Context, id string) (record, error) {
 	return row, nil
 }
 
-func (svc *Service) decision(row *record, decision, reviewedDigest string) (mutation, error) {
-	now := time.Now()
-	pending := row.Status == Pending
-	reviewable := pending || row.Status == Stalled
+func awaitingApproval(status string) bool {
+	return status == Pending || status == Stalled
+}
 
-	next := mutation{condition: "1 = 1"}
-	if pending {
-		next.condition = "expires_at > ?"
-		next.args = []any{now.UnixNano()}
+func reviewDecision(row *record, decision, reviewedDigest string) (mutation, error) {
+	if !awaitingApproval(row.Status) {
+		return mutation{}, ErrConflict
 	}
+	var next mutation
 
-	switch {
-	case decision == "approve" && reviewable:
+	switch decision {
+	case "approve":
 		_, err := row.snapshot()
 		if err != nil {
 			return mutation{}, err
@@ -286,11 +299,9 @@ func (svc *Service) decision(row *record, decision, reviewedDigest string) (muta
 			return mutation{}, ErrConflict
 		}
 
-		next.status, next.runAt = Queued, now.Add(svc.Delay).UnixNano()
-	case decision == "reject" && reviewable:
+		next.status = Queued
+	case "reject":
 		next.status = Rejected
-	case decision == "cancel" && !row.Claimed && (pending || row.Status == Queued):
-		next.status = Cancelled
 	default:
 		return mutation{}, ErrConflict
 	}
@@ -314,15 +325,28 @@ func (svc *Service) transition(ctx context.Context, row *record, next mutation) 
 	}
 	defer rollback(tx)
 
-	const transitionParameters = 9
+	now := time.Now()
+	var expiry any
+	if next.status == Stalled {
+		expiry = now.Add(svc.TTL).UnixNano()
+	}
+	if awaitingApproval(row.Status) && (next.status == Queued || next.status == Rejected) {
+		next.condition, next.args = "expires_at > ?", []any{now.UnixNano()}
+		if next.status == Queued {
+			next.runAt = now.Add(svc.Delay).UnixNano()
+		}
+	}
+	const transitionParameters = 10
 	args := make([]any, 0, transitionParameters+len(next.args))
 	args = append(args,
-		next.status, next.runAt, next.claim, next.detail, row.ID, row.Status,
+		next.status, next.runAt, next.claim, next.detail, expiry, row.ID, row.Status,
 		row.Claimed, row.Digest, row.RunAt,
 	)
 	args = append(args, next.args...)
 	// The suffix is supplied by internal state transitions and contains no input.
-	result, err := tx.ExecContext(ctx, `UPDATE actions SET status=?, run_at=?, claimed=?, detail=?
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE actions SET status=?, run_at=?, claimed=?, detail=?, expires_at=COALESCE(?,expires_at)
 		WHERE id=? AND status=? AND claimed=? AND digest=? AND run_at=? AND `+next.condition,
 		args...)
 	if err != nil {

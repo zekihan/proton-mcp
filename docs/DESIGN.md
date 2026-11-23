@@ -36,15 +36,15 @@ TELEGRAM_CHAT_ID      secret
 SEND_DELAY            3m   (Go duration)
 APPROVAL_TTL          1h
 MAX_BODY_BYTES        65536
-TELEGRAM_API_URL      https://api.telegram.org
+TELEGRAM_API_URL      https://api.telegram.org (HTTPS required except on loopback)
 SAVE_SENT_COPY        false
 
 ## HTTP surface
 /livez                        200 when SQLite is OK; 503 otherwise, JSON detail; no Bridge checks
-/healthz                      200 when DB ok AND IMAP login AND SMTP auth to Bridge succeed (cached ~30s, one in-flight probe); 503 otherwise, JSON detail
+/healthz                      200 when DB ok AND IMAP login AND SMTP auth to Bridge succeed (cached ~30s, one shared check with a 5s total budget and 3s per probe); 503 otherwise, JSON detail
 /mcp                          MCP streamable HTTP, bearer JWT (RS256, issuer JWKS, aud=MCP_AUDIENCE, sub=OWNER_SUBJECT)
 /.well-known/oauth-protected-resource  resource metadata naming OIDC_ISSUER
-/auth/login, /auth/callback, /auth/logout   browser OIDC (PKCE) session for approval pages
+/auth/login, /auth/callback, /auth/logout   browser OIDC (PKCE) session for approval pages; renewal rotates the session token
 /approve/{id}                 GET shows the exact pending action; POST approve / reject (CSRF-protected, owner session required)
 /queued/{id}/cancel           POST cancel a queued action (owner session, CSRF)
 Security headers, no external assets, no remote fetches.
@@ -57,8 +57,8 @@ Ungated:
 - read_message(folder, uid)  -> BODY.PEEK (never sets \Seen); HTML->plain text, strip hidden
   elements/comments/styles/scripts; wrap body in <untrusted_email from="..." subject="...">...</untrusted_email>;
   cap MAX_BODY_BYTES with truncation note; attachments listed as name/type/size only.
-- mark_messages(folder, uids[], read bool)
-- move_messages(folder, uids[], to_folder)  (incl. Trash; discard_draft == move to Trash)
+- mark_messages(folder, uids[], read bool), up to 100 UIDs
+- move_messages(folder, uids[], to_folder)  (incl. Trash; discard_draft == move to Trash), up to 100 UIDs
 - save_draft(to[], cc[], subject, body_text, in_reply_to_folder?, in_reply_to_uid?, replace_draft_uid?)
   -> APPEND to Drafts with \Draft; sets In-Reply-To/References when replying.
   When replace_draft_uid is given AND that UID is recorded in the DB as created by this server,
@@ -70,14 +70,18 @@ Gated (create a pending action, Telegram ping with link PUBLIC_URL/approve/{id},
 - send_draft(draft_uid)  snapshot the draft (full RFC822 bytes + sha256) at request time;
   approval page renders From/To/Cc/Bcc(reject any Bcc)/Subject/body from the snapshot.
 - forward_message(folder, uid, to[], note_text)  body-only forward, no attachments; snapshot built at request time.
-- delete_permanently(folder, uids[])  only allowed when folder is Trash or Spam; snapshot lists the messages.
+- delete_permanently(folder, uids[])  up to 100 UIDs in Trash or Spam; snapshot lists the messages.
 
 ## Lifecycle
 pending --approve--> approved_queued (run_at = now+SEND_DELAY) --timer--> sent/done | failed
 pending --reject--> rejected ; pending --TTL--> expired ; queued --cancel--> cancelled (draft untouched)
-On startup: any approved_queued with run_at in the past is marked stalled and a Telegram
-re-confirm ping is sent (link to /approve/{id}); never auto-executed late. Re-approval of a
-stalled action re-queues with a fresh SEND_DELAY.
+Cancellation stays available while the scheduler prepares the Bridge connection. A
+transaction checks cancellation and records the start of execution immediately
+before the first SMTP or IMAP write. Later cancellation attempts return a conflict.
+On startup, overdue queued actions that have not started execution are marked
+stalled. Telegram sends a link to /approve/{id} for reconfirmation. The action
+expires after APPROVAL_TTL from the stall. Re-approval queues it with a fresh
+SEND_DELAY. Interrupted execution is marked failed and never replayed.
 Sending: SMTP via Bridge with the snapshot bytes exactly. After SMTP accepts, expunge the
 draft (send_draft only). Do NOT append to Sent (Proton files it); make this behavior a flag
 SAVE_SENT_COPY default false.

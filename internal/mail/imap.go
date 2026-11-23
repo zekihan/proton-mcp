@@ -14,6 +14,7 @@ import (
 const (
 	maxMessageBytes = 64 << 20
 	maxPageSize     = 100
+	maxBatchUIDs    = 100
 )
 
 type Folder struct {
@@ -143,6 +144,9 @@ func (bridge *Bridge) Drafts(ctx context.Context) (string, error) {
 }
 
 func uidSet(uids []uint32) (imap.UIDSet, error) {
+	if len(uids) > maxBatchUIDs {
+		return nil, ErrUIDLimit
+	}
 	if len(uids) == 0 || slices.Contains(uids, 0) {
 		return nil, ErrInput
 	}
@@ -395,7 +399,10 @@ func (bridge *Bridge) Mark(ctx context.Context, folder string, uids []uint32, re
 
 func (bridge *Bridge) Move(ctx context.Context, folder string, uids []uint32, to string) error {
 	set, err := uidSet(uids)
-	if err != nil || to == "" || strings.ContainsAny(to, "\r\n\x00") {
+	if err != nil {
+		return err
+	}
+	if to == "" || strings.ContainsAny(to, "\r\n\x00") {
 		return ErrInput
 	}
 
@@ -478,7 +485,7 @@ func (bridge *Bridge) DeletePreview(ctx context.Context, folder string, uids []u
 }
 
 func (bridge *Bridge) Expunge(ctx context.Context, folder string, validity uint32,
-	uids []uint32, disposable bool,
+	uids []uint32, disposable bool, beforeWrite func() error,
 ) error {
 	set, err := uidSet(uids)
 	if err != nil {
@@ -505,6 +512,13 @@ func (bridge *Bridge) Expunge(ctx context.Context, folder string, validity uint3
 
 	if actual != validity || !client.Caps().Has(imap.CapUIDPlus) {
 		return ErrUnsafe
+	}
+
+	if beforeWrite != nil {
+		err = beforeWrite()
+		if err != nil {
+			return err
+		}
 	}
 
 	return expunge(client, set)

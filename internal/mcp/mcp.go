@@ -351,7 +351,8 @@ func publicError(err error) error {
 		return nil
 	case errors.Is(err, mail.ErrInput), errors.Is(err, mail.ErrNotFound),
 		errors.Is(err, mail.ErrTooLarge), errors.Is(err, mail.ErrUnsafe),
-		errors.Is(err, mail.ErrBridge), errors.Is(err, actions.ErrConflict):
+		errors.Is(err, mail.ErrBridge), errors.Is(err, mail.ErrUIDLimit),
+		errors.Is(err, actions.ErrConflict), errors.Is(err, actions.ErrTooLate):
 		return err
 	default:
 		return errTool

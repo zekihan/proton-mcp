@@ -144,6 +144,8 @@ func writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, mail.ErrNotFound):
 		http.Error(w, "Action not found.", http.StatusNotFound)
+	case errors.Is(err, actions.ErrTooLate):
+		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, actions.ErrConflict):
 		http.Error(w, "This action has changed. Reload the approval page.", http.StatusConflict)
 	case errors.Is(err, actions.ErrIntegrity):

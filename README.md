@@ -51,7 +51,7 @@ database and its backups the same access controls as the mailbox.
 | `BRIDGE_CA_FILE` | Optional PEM bundle used as the trust roots for Bridge STARTTLS |
 | `TELEGRAM_BOT_TOKEN` | Required Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Required destination chat |
-| `TELEGRAM_API_URL` | `https://api.telegram.org` |
+| `TELEGRAM_API_URL` | `https://api.telegram.org`; HTTPS required except on loopback |
 | `SEND_DELAY` | `3m` |
 | `APPROVAL_TTL` | `1h` |
 | `MAX_BODY_BYTES` | `65536` bytes of decoded text returned by `read_message` before escaping |

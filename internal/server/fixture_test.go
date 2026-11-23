@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,6 +64,9 @@ type fixture struct {
 	notifications chan string
 	dbPath        string
 	rejectSMTP    atomic.Bool
+	smtpAuthGate  atomic.Pointer[callGate]
+	smtpMailGate  atomic.Pointer[callGate]
+	imapLoginGate atomic.Pointer[callGate]
 	imapProbes    atomic.Int64
 	smtpProbes    atomic.Int64
 }
@@ -145,6 +149,7 @@ func (fx *fixture) startMail(t *testing.T) {
 
 			return &testIMAPSession{
 				SessionIMAP4rev2: session,
+				loginGate:        fx.imapLoginGate.Load(),
 			}, nil, nil
 		},
 		TLSConfig: serverTLS,
@@ -162,6 +167,7 @@ func (fx *fixture) startMail(t *testing.T) {
 			delivered: fx.delivered,
 			reject:    &fx.rejectSMTP,
 			authCalls: &fx.smtpProbes,
+			authGate:  fx.smtpAuthGate.Load(), mailGate: fx.smtpMailGate.Load(),
 		}, nil
 	}))
 	smtpServer.Domain = "example.com"
@@ -183,6 +189,18 @@ var testFolders = []string{inbox, drafts, trash, spam, sent, "Trash"}
 
 type testIMAPSession struct {
 	imapserver.SessionIMAP4rev2
+
+	loginGate *callGate
+}
+
+func (session *testIMAPSession) Login(user, pass string) error {
+	session.loginGate.block()
+	err := session.SessionIMAP4rev2.Login(user, pass)
+	if err != nil {
+		return fmt.Errorf("fixture login: %w", err)
+	}
+
+	return nil
 }
 
 // The in-memory backend's CREATE does not apply requested SPECIAL-USE flags.
@@ -249,15 +267,56 @@ func mailTLS(t *testing.T) (*tls.Config, *tls.Config) {
 	}, clientTLS
 }
 
+type callGate struct {
+	entered chan struct{}
+	release chan struct{}
+	open    func()
+}
+
+func newCallGate(t *testing.T) *callGate {
+	t.Helper()
+	gate := &callGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	gate.open = sync.OnceFunc(func() { close(gate.release) })
+	t.Cleanup(gate.open)
+
+	return gate
+}
+
+func (gate *callGate) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Bridge did not reach the test boundary")
+	}
+}
+
+func (gate *callGate) block() {
+	if gate == nil {
+		return
+	}
+	select {
+	case gate.entered <- struct{}{}:
+	default:
+	}
+	<-gate.release
+}
+
 type smtpSession struct {
+	authGate  *callGate
+	mailGate  *callGate
 	authCalls *atomic.Int64
 	reject    *atomic.Bool
 	delivered chan []byte
 }
 
-func (*smtpSession) Reset()                               {}
-func (*smtpSession) Logout() error                        { return nil }
-func (*smtpSession) Mail(string, *smtp.MailOptions) error { return nil }
+func (*smtpSession) Reset()        {}
+func (*smtpSession) Logout() error { return nil }
+func (session *smtpSession) Mail(string, *smtp.MailOptions) error {
+	session.mailGate.block()
+
+	return nil
+}
 func (*smtpSession) Rcpt(string, *smtp.RcptOptions) error { return nil }
 func (*smtpSession) AuthMechanisms() []string             { return []string{sasl.Plain} }
 
@@ -269,6 +328,7 @@ func (session *smtpSession) Auth(mechanism string) (sasl.Server, error) {
 
 	return sasl.NewPlainServer(func(_, user, pass string) error {
 		session.authCalls.Add(1)
+		session.authGate.block()
 		if user != username || pass != password {
 			return smtp.ErrAuthFailed
 		}

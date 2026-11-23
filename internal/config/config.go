@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -50,7 +51,7 @@ func Load(ctx context.Context) (*Config, error) {
 	cfg.PublicURL = strings.TrimRight(cfg.PublicURL, "/")
 	if !validURL(cfg.PublicURL, cfg.CookieInsecure, true) ||
 		!validURL(cfg.OIDCIssuer, cfg.CookieInsecure, false) ||
-		!validURL(cfg.TelegramAPIURL, true, false) ||
+		!validTelegramURL(cfg.TelegramAPIURL) ||
 		cfg.SendDelay <= 0 || cfg.ApprovalTTL <= 0 || cfg.MaxBodyBytes <= 0 {
 		return nil, errConfig
 	}
@@ -72,4 +73,16 @@ func validURL(raw string, allowHTTP, originOnly bool) bool {
 	return err == nil && parsed.Hostname() != "" && parsed.Fragment == "" && parsed.User == nil &&
 		parsed.RawQuery == "" && (!originOnly || parsed.Path == "") &&
 		(parsed.Scheme == "https" || (allowHTTP && parsed.Scheme == "http"))
+}
+
+func validTelegramURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	address, err := netip.ParseAddr(host)
+	loopback := strings.EqualFold(host, "localhost") || (err == nil && address.Unmap().IsLoopback())
+
+	return validURL(raw, loopback, false)
 }
