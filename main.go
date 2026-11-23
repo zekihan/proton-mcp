@@ -78,7 +78,7 @@ func run() error {
 			IMAPAddr: cfg.IMAPAddr, SMTPAddr: cfg.SMTPAddr,
 			Username: cfg.BridgeUsername, Password: cfg.BridgePassword, TLSConfig: bridgeTLS,
 		}, Delay: cfg.SendDelay, TTL: cfg.ApprovalTTL, MaxBody: cfg.MaxBodyBytes,
-		SaveSentCopy: cfg.SaveSentCopy, Telegram: &actions.Telegram{
+		SaveSentCopy: cfg.SaveSentCopy, PublicURL: cfg.PublicURL, Telegram: &actions.Telegram{
 			PublicURL: cfg.PublicURL, APIURL: cfg.TelegramAPIURL,
 			Token: cfg.TelegramBotToken, ChatID: cfg.TelegramChatID,
 		},

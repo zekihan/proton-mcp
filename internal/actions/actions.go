@@ -51,6 +51,16 @@ type Service struct {
 	MaxBody      int
 	draftMu      sync.Mutex
 	SaveSentCopy bool
+	PublicURL    string
+}
+
+// WithApprovalURL links an action that still awaits the owner or can be cancelled.
+func (svc *Service) WithApprovalURL(action Action) Action {
+	if svc.PublicURL != "" && (awaitingApproval(action.Status) || action.Status == Queued) {
+		action.ApprovalURL = svc.PublicURL + "/approve/" + action.ID
+	}
+
+	return action
 }
 
 type Snapshot struct {
@@ -68,6 +78,8 @@ type Action struct {
 	Status string     `json:"status"`
 	RunAt  *time.Time `json:"run_at,omitempty"`
 	Detail string     `json:"detail,omitempty"`
+	// ApprovalURL is where the owner reviews, approves or cancels the action.
+	ApprovalURL string `json:"approval_url,omitempty"`
 }
 
 type record struct {

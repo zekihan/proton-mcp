@@ -117,7 +117,8 @@ func (fx *fixture) reopen(t *testing.T) {
 	requireNoError(t, err)
 	old := fx.service
 	fx.service = &actions.Service{
-		DB: db, Bridge: old.Bridge, Delay: old.Delay, TTL: old.TTL,
+		PublicURL: publicURL,
+		DB:        db, Bridge: old.Bridge, Delay: old.Delay, TTL: old.TTL,
 		MaxBody: old.MaxBody, Telegram: old.Telegram,
 	}
 	requireNoError(t, fx.service.Recover(t.Context(), time.Now()))
@@ -177,6 +178,7 @@ func (fx *fixture) startMail(t *testing.T) {
 	t.Cleanup(func() { _ = smtpServer.Close() })
 
 	fx.service = &actions.Service{
+		PublicURL: publicURL,
 		Bridge: &mail.Bridge{
 			IMAPAddr: imapListener.Addr().String(), SMTPAddr: smtpListener.Addr().String(),
 			Username: username, Password: password, TLSConfig: clientTLS,

@@ -303,6 +303,9 @@ func add[In, Out any](
 		event.Status = actions.Done
 		if action, ok := any(result).(actions.Action); ok && err == nil {
 			event.Status, event.ID = action.Status, action.ID
+			if linked, ok := any(svc.WithApprovalURL(action)).(Out); ok {
+				result = linked
+			}
 		}
 
 		if err != nil {

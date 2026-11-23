@@ -154,6 +154,9 @@ func (fx *fixture) requestSend(t *testing.T, uid uint32) actions.Action {
 	if action.Status != actions.Pending || action.ID == "" {
 		t.Fatalf("request returned %+v", action)
 	}
+	if action.ApprovalURL != publicURL+"/approve/"+action.ID {
+		t.Fatalf("approval URL = %q", action.ApprovalURL)
+	}
 
 	return action
 }

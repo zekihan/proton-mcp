@@ -66,6 +66,7 @@ Ungated:
   No attachments in v1.
 - cancel_send(action_id)  cancel a queued or pending action
 - get_action(action_id)   status: pending|approved_queued|cancelled|rejected|expired|stalled|sent|failed|done
+- Gated and get_action results include approval_url (PUBLIC_URL/approve/{id}) while the action is pending, stalled or queued, so the link can be shared even when Telegram is unavailable.
 Gated (create a pending action, Telegram ping with link PUBLIC_URL/approve/{id}, return action id + status, NEVER "sent"):
 - send_draft(draft_uid)  snapshot the draft (full RFC822 bytes + sha256) at request time;
   approval page renders From/To/Cc/Bcc(reject any Bcc)/Subject/body from the snapshot.
