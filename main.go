@@ -56,6 +56,10 @@ func run() error {
 		slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})),
 	)
 	utils.LogVersionInfo(ctx)
+	bridgeTLS, err := mail.LoadBridgeTLS(cfg.BridgeCAFile)
+	if err != nil {
+		return err
+	}
 
 	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
@@ -72,7 +76,7 @@ func run() error {
 	svc := &actions.Service{
 		DB: db, Bridge: &mail.Bridge{
 			IMAPAddr: cfg.IMAPAddr, SMTPAddr: cfg.SMTPAddr,
-			Username: cfg.BridgeUsername, Password: cfg.BridgePassword,
+			Username: cfg.BridgeUsername, Password: cfg.BridgePassword, TLSConfig: bridgeTLS,
 		}, Delay: cfg.SendDelay, TTL: cfg.ApprovalTTL, MaxBody: cfg.MaxBodyBytes,
 		SaveSentCopy: cfg.SaveSentCopy, Telegram: &actions.Telegram{
 			PublicURL: cfg.PublicURL, APIURL: cfg.TelegramAPIURL,

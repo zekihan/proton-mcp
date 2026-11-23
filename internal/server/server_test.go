@@ -557,3 +557,35 @@ func TestPermanentDeleteChecksUIDValidity(t *testing.T) {
 		t.Fatal("replacement message was changed")
 	}
 }
+
+func TestLivezChecksOnlySQLite(t *testing.T) {
+	fx := newFixture(t)
+	fx.service.Bridge = nil
+	resp := fx.http(t, http.MethodGet, "/livez", nil, nil)
+	expectCode(t, resp, http.StatusOK)
+	if resp.Body.String() != "{\"db\":true}\n" {
+		t.Fatalf("unexpected live response %s", resp.Body)
+	}
+	requireNoError(t, fx.service.DB.Close())
+	expectCode(t, fx.http(t, http.MethodGet, "/livez", nil, nil), http.StatusServiceUnavailable)
+}
+
+func TestHealthCoalescesConcurrentProbes(t *testing.T) {
+	fx := newFixture(t)
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
+			resp := httptest.NewRecorder()
+			fx.handler.ServeHTTP(resp, req)
+			if resp.Code != http.StatusOK {
+				t.Errorf("health returned %d: %s", resp.Code, resp.Body)
+			}
+		})
+	}
+	workers.Wait()
+	if imapCount, smtpCount := fx.imapProbes.Load(), fx.smtpProbes.Load(); imapCount != 1 ||
+		smtpCount != 1 {
+		t.Fatalf("health connected %d times to IMAP and %d times to SMTP", imapCount, smtpCount)
+	}
+}

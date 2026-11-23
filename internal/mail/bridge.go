@@ -4,8 +4,10 @@ package mail
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
+	"os"
 	"time"
 
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -22,6 +24,27 @@ var (
 	ErrInput    = errors.New("invalid mail arguments")
 	ErrTooLarge = errors.New("message exceeds the supported size")
 )
+
+var errBridgeCA = errors.New("BRIDGE_CA_FILE must contain a readable PEM CA bundle")
+
+// LoadBridgeTLS loads trust roots for Bridge STARTTLS only.
+func LoadBridgeTLS(caFile string) (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if caFile == "" {
+		return cfg, nil
+	}
+	pemData, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, errBridgeCA
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemData) {
+		return nil, errBridgeCA
+	}
+	cfg.RootCAs = roots
+
+	return cfg, nil
+}
 
 type Bridge struct {
 	TLSConfig *tls.Config

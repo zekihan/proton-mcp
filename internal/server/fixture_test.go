@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -61,6 +63,8 @@ type fixture struct {
 	notifications chan string
 	dbPath        string
 	rejectSMTP    atomic.Bool
+	imapProbes    atomic.Int64
+	smtpProbes    atomic.Int64
 }
 
 var errTestRPC = errors.New("test MCP call failed")
@@ -133,6 +137,7 @@ func (fx *fixture) startMail(t *testing.T) {
 	memory.AddUser(fx.user)
 	imapServer := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			fx.imapProbes.Add(1)
 			session, ok := memory.NewSession().(imapserver.SessionIMAP4rev2)
 			if !ok {
 				return nil, nil, errTestRPC
@@ -153,7 +158,11 @@ func (fx *fixture) startMail(t *testing.T) {
 	t.Cleanup(func() { _ = imapServer.Close() })
 
 	smtpServer := smtp.NewServer(smtp.BackendFunc(func(_ *smtp.Conn) (smtp.Session, error) {
-		return &smtpSession{delivered: fx.delivered, reject: &fx.rejectSMTP}, nil
+		return &smtpSession{
+			delivered: fx.delivered,
+			reject:    &fx.rejectSMTP,
+			authCalls: &fx.smtpProbes,
+		}, nil
 	}))
 	smtpServer.Domain = "example.com"
 	smtpServer.TLSConfig = serverTLS
@@ -225,18 +234,23 @@ func mailTLS(t *testing.T) (*tls.Config, *tls.Config) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, info, info, &key.PublicKey, key)
 	requireNoError(t, err)
-	cert, err := x509.ParseCertificate(der)
+	caPath := filepath.Join(t.TempDir(), "bridge-ca.pem")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	requireNoError(t, os.WriteFile(caPath, caPEM, 0o600))
+	clientTLS, err := mail.LoadBridgeTLS(caPath)
 	requireNoError(t, err)
-	roots := x509.NewCertPool()
-	roots.AddCert(cert)
+	if clientTLS.RootCAs == nil {
+		t.Fatal("Bridge CA was not loaded")
+	}
 
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
-	}, &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	}, clientTLS
 }
 
 type smtpSession struct {
+	authCalls *atomic.Int64
 	reject    *atomic.Bool
 	delivered chan []byte
 }
@@ -248,12 +262,13 @@ func (*smtpSession) Rcpt(string, *smtp.RcptOptions) error { return nil }
 func (*smtpSession) AuthMechanisms() []string             { return []string{sasl.Plain} }
 
 //nolint:ireturn // Method required by go-smtp.
-func (*smtpSession) Auth(mechanism string) (sasl.Server, error) {
+func (session *smtpSession) Auth(mechanism string) (sasl.Server, error) {
 	if mechanism != sasl.Plain {
 		return nil, smtp.ErrAuthUnknownMechanism
 	}
 
 	return sasl.NewPlainServer(func(_, user, pass string) error {
+		session.authCalls.Add(1)
 		if user != username || pass != password {
 			return smtp.ErrAuthFailed
 		}

@@ -30,7 +30,7 @@ IMAP_ADDR             bridge.example.com:1143
 SMTP_ADDR             bridge.example.com:1025
 BRIDGE_USERNAME       secret
 BRIDGE_PASSWORD       secret
-SSL_CERT_FILE         CA bundle trusting Bridge's cert (mount a bundle containing the Bridge CA)
+BRIDGE_CA_FILE        optional PEM CA bundle used exclusively for Bridge STARTTLS; other HTTPS uses system roots
 TELEGRAM_BOT_TOKEN    secret
 TELEGRAM_CHAT_ID      secret
 SEND_DELAY            3m   (Go duration)
@@ -40,7 +40,8 @@ TELEGRAM_API_URL      https://api.telegram.org
 SAVE_SENT_COPY        false
 
 ## HTTP surface
-/healthz                      200 when DB ok AND IMAP login AND SMTP auth to Bridge succeed (cached ~30s); 503 otherwise, JSON detail
+/livez                        200 when SQLite is OK; 503 otherwise, JSON detail; no Bridge checks
+/healthz                      200 when DB ok AND IMAP login AND SMTP auth to Bridge succeed (cached ~30s, one in-flight probe); 503 otherwise, JSON detail
 /mcp                          MCP streamable HTTP, bearer JWT (RS256, issuer JWKS, aud=MCP_AUDIENCE, sub=OWNER_SUBJECT)
 /.well-known/oauth-protected-resource  resource metadata naming OIDC_ISSUER
 /auth/login, /auth/callback, /auth/logout   browser OIDC (PKCE) session for approval pages

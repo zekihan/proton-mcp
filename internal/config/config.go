@@ -27,6 +27,7 @@ type Config struct {
 	PublicURL        string        `env:"PUBLIC_URL, required"`
 	OIDCClientSecret string        `env:"OIDC_CLIENT_SECRET, required"`
 	SMTPAddr         string        `env:"SMTP_ADDR, required"`
+	BridgeCAFile     string        `env:"BRIDGE_CA_FILE"`
 	BridgeUsername   string        `env:"BRIDGE_USERNAME, required"`
 	BridgePassword   string        `env:"BRIDGE_PASSWORD, required"`
 	TelegramBotToken string        `env:"TELEGRAM_BOT_TOKEN, required"`

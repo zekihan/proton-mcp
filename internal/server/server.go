@@ -28,6 +28,7 @@ type Server struct {
 func New(svc *actions.Service, identity *auth.Service, mcp http.Handler) http.Handler {
 	server := &Server{actions: svc, health: &health{svc: svc, ttl: healthTTL}}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", server.health.live)
 	mux.Handle("GET /healthz", server.health)
 	mux.Handle("/mcp", identity.RequireBearer(mcp))
 	mux.Handle("/.well-known/oauth-protected-resource", identity.ProtectedResourceHandler())
