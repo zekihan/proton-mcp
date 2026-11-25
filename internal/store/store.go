@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/zekihan/go-commons/sqlitestore"
 
 	_ "modernc.org/sqlite" // Register the SQLite driver.
 )
@@ -23,68 +24,69 @@ type Event struct {
 	Recipients []string `json:"recipients,omitempty"`
 }
 
+// migrations are applied in order by sqlitestore; PRAGMA user_version then
+// counts how many have run. The base schema deliberately creates actions
+// without the execution flags so the alter migration below can add them to
+// databases created before those columns existed.
+var migrations = []string{schema, alterActions, actionDataFixups}
+
 func Open(ctx context.Context, path string) (*sqlx.DB, error) {
-	db, err := sqlx.Open("sqlite", path)
+	err := normalizeLegacyVersion(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	st, err := sqlitestore.Open(ctx, path, migrations)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite: %w", err)
 	}
 
-	db.SetMaxOpenConns(1)
-
-	_, err = db.ExecContext(ctx, schema)
-	if err != nil {
-		return nil, fmt.Errorf("initialize SQLite: %w", closeAfterError(db, err))
-	}
-
-	err = migrateActions(ctx, db)
-	if err != nil {
-		return nil, fmt.Errorf("migrate actions: %w", closeAfterError(db, err))
-	}
-
-	return db, nil
+	return st.DB(), nil
 }
 
-func migrateActions(ctx context.Context, db *sqlx.DB) error {
-	var version int
-	err := db.GetContext(ctx, &version, "PRAGMA user_version")
-	if err != nil {
-		return fmt.Errorf("read schema version: %w", err)
-	}
-	if version >= 1 {
+// normalizeLegacyVersion maps a database written by the pre-sqlitestore
+// schema onto the migration numbering above. The old code recorded
+// user_version 1 only after adding the action execution flags and applying
+// the data fixups, which is exactly the state migrations 2 and 3 produce, so
+// such databases are stamped with the full migration count. A version-1
+// database cannot occur in the new numbering: sqlitestore applies all
+// pending migrations in one transaction.
+func normalizeLegacyVersion(ctx context.Context, path string) error {
+	if path == ":memory:" {
 		return nil
 	}
-	tx, err := db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin migration: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, `
-  ALTER TABLE actions ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
-  ALTER TABLE actions ADD COLUMN execution_started INTEGER NOT NULL DEFAULT 0;
-  UPDATE actions SET execution_started=1 WHERE claimed=1;
-  UPDATE actions SET expires_at=0 WHERE status='stalled';
-  PRAGMA user_version = 1;
- `)
-	if err != nil {
-		//nolint:errcheck // The original migration error is returned.
-		_ = tx.Rollback()
 
-		return fmt.Errorf("add action execution flags: %w", err)
-	}
-	err = tx.Commit()
+	_, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("commit migration: %w", err)
+		if os.IsNotExist(err) {
+			return nil
+		}
+
+		return fmt.Errorf("stat SQLite database: %w", err)
+	}
+
+	db, err := sqlx.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("open legacy SQLite database: %w", err)
+	}
+
+	var version int
+
+	err = db.GetContext(ctx, &version, "PRAGMA user_version")
+	if err == nil && version == 1 {
+		_, err = db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", len(migrations)))
+	}
+
+	closeErr := db.Close()
+	if err != nil {
+		return fmt.Errorf("normalize legacy SQLite database: %w", err)
+	}
+
+	if closeErr != nil {
+		return fmt.Errorf("close legacy SQLite database: %w", closeErr)
 	}
 
 	return nil
-}
-
-func closeAfterError(db *sqlx.DB, cause error) error {
-	err := db.Close()
-	if err != nil {
-		slog.Error("Could not close SQLite")
-	}
-
-	return cause
 }
 
 func Record(ctx context.Context, db sqlx.ExecerContext, event Event) error {
@@ -115,11 +117,11 @@ func Log(ctx context.Context, event Event) {
 	)
 }
 
+// schema is the base schema. Connection pragmas (WAL, busy timeout, foreign
+// keys) come from the sqlitestore DSN.
+// The oidc_transactions table carries return_to for the local sign-in flow
+// in internal/auth.
 const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
-PRAGMA busy_timeout = 5000;
-
 CREATE TABLE IF NOT EXISTS sessions (
 	token_hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL,
 	name TEXT, email TEXT, created_at TEXT NOT NULL, renewed_at TEXT NOT NULL, expires_at TEXT NOT NULL
@@ -141,9 +143,21 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 CREATE INDEX IF NOT EXISTS idx_actions_due ON actions(status, claimed, run_at, expires_at);
 CREATE TABLE IF NOT EXISTS telegram_outbox (
- id INTEGER PRIMARY KEY, text TEXT NOT NULL, try_after INTEGER NOT NULL DEFAULT 0
+	id INTEGER PRIMARY KEY, text TEXT NOT NULL, try_after INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS audit (
 	id INTEGER PRIMARY KEY, at INTEGER NOT NULL, event TEXT NOT NULL
 );
+`
+
+const alterActions = `
+ALTER TABLE actions ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE actions ADD COLUMN execution_started INTEGER NOT NULL DEFAULT 0;
+`
+
+// Legacy in-flight claims have an unknown execution state, so they are
+// marked as started; legacy stalls get a fresh deadline on recovery.
+const actionDataFixups = `
+UPDATE actions SET execution_started=1 WHERE claimed=1;
+UPDATE actions SET expires_at=0 WHERE status='stalled';
 `

@@ -1,5 +1,12 @@
 // Package auth implements SSO sign-in against one OIDC provider and the
 // server-side sessions (DESIGN.md section 7, Sign-in).
+//
+// Bearer protection for /mcp comes from go-commons/oidcauth (see New). The
+// browser flow stays local because it has proton-specific behavior the
+// shared package does not expose as options: sign-in returns to the
+// /approve/{id} page that required it (oidc_transactions.return_to),
+// anonymous approval visits redirect to sign-in and back, session renewal
+// rotates the session token (DESIGN.md), and sign-out requires CSRF.
 package auth
 
 import (
@@ -16,6 +23,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jmoiron/sqlx"
+	"github.com/zekihan/go-commons/oidcauth"
 	"golang.org/x/oauth2"
 )
 
@@ -51,13 +59,15 @@ type Config struct {
 	CookieInsecure bool
 }
 
-// Service owns the sign-in flow and sessions.
+// Service owns the sign-in flow and sessions. The browser flow stays local
+// (see oidc.go and session.go); bearer protection for /mcp is delegated to
+// the shared oidcauth service (methods below).
 type Service struct {
+	shared   *oidcauth.Service[oidcauth.IdentityInfo]
 	db       *sqlx.DB
 	client   *http.Client
 	oauth    *oauth2.Config
 	verifier *oidc.IDTokenVerifier
-	bearer   *oidc.IDTokenVerifier
 	now      func() time.Time
 	cfg      Config
 }
@@ -81,16 +91,35 @@ func New(ctx context.Context, cfg *Config, db *sqlx.DB) (*Service, error) {
 		return nil, errNoJWKS
 	}
 
-	// One key set serves both verifiers, so keys are fetched and cached once.
 	keySet := oidc.NewRemoteKeySet(ctx, discovery.JWKSURL)
+
+	shared, err := oidcauth.New(ctx, &oidcauth.Config[oidcauth.IdentityInfo]{
+		Authorize:         oidcauth.IdentityInfoAuthorize,
+		HTTPClient:        client,
+		PublicURL:         cfg.PublicURL,
+		Issuer:            cfg.Issuer,
+		ClientID:          cfg.ClientID,
+		ClientSecret:      cfg.ClientSecret,
+		OwnerSubject:      cfg.OwnerSubject,
+		MCPClientID:       cfg.MCPClientID,
+		MCPAudience:       cfg.MCPAudience,
+		AppName:           "Proton MCP",
+		SessionCookie:     sessionCookie,
+		TransactionCookie: oidcCookie,
+		SuccessPath:       "/",
+		CookieInsecure:    cfg.CookieInsecure,
+	}, db)
+	if err != nil {
+		return nil, fmt.Errorf("create shared auth service: %w", err)
+	}
 
 	service := &Service{
 		cfg:      *cfg,
 		db:       db,
 		client:   client,
+		shared:   shared,
 		now:      time.Now,
 		verifier: nil,
-		bearer:   nil,
 		oauth: &oauth2.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
@@ -113,13 +142,24 @@ func New(ctx context.Context, cfg *Config, db *sqlx.DB) (*Service, error) {
 		SkipIssuerCheck:            false,
 		InsecureSkipSignatureCheck: false,
 	})
-	service.bearer = newBearerVerifier(
-		cfg.Issuer,
-		keySet,
-		func() time.Time { return service.now() },
-	)
 
 	return service, nil
+}
+
+// MCPEnabled reports whether an MCP client is configured.
+func (svc *Service) MCPEnabled() bool {
+	return svc.shared.MCPEnabled()
+}
+
+// ProtectedResourceHandler serves the protected resource metadata for /mcp.
+func (svc *Service) ProtectedResourceHandler() http.Handler {
+	return svc.shared.ProtectedResourceHandler()
+}
+
+// RequireBearer accepts only access tokens issued to the MCP client for
+// the owner, via the shared oidcauth service.
+func (svc *Service) RequireBearer(next http.Handler) http.Handler {
+	return svc.shared.RequireBearer(next)
 }
 
 func randomToken() string {
