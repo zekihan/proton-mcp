@@ -33,6 +33,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/oauth2-proxy/mockoidc"
+	"github.com/zekihan/go-commons/mockidp"
 
 	"github.com/zekihan/proton-mcp/internal/actions"
 	"github.com/zekihan/proton-mcp/internal/auth"
@@ -80,10 +81,10 @@ func newFixture(t *testing.T) *fixture {
 		dbPath: filepath.Join(t.TempDir(), "proton-mcp.db"),
 	}
 	fx.startMail(t)
-	provider, err := mockoidc.Run()
+	idp, err := mockidp.Start(t.Context())
 	requireNoError(t, err)
-	t.Cleanup(func() { requireNoError(t, provider.Shutdown()) })
-	fx.provider = provider
+	t.Cleanup(func() { requireNoError(t, idp.Close()) })
+	fx.provider = idp.Provider()
 	telegram := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Text string `json:"text"`

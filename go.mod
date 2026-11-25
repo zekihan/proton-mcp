@@ -14,7 +14,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/oauth2-proxy/mockoidc v0.0.0-20261103160011-e06ed0b7cb7f
 	github.com/sethvargo/go-envconfig/v2 v2.0.0
-	github.com/zekihan/go-commons v1.2.0
+	github.com/zekihan/go-commons v1.4.0
 	golang.org/x/image v0.48.0
 	golang.org/x/net v0.63.0
 	golang.org/x/oauth2 v0.38.0
