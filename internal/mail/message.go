@@ -44,7 +44,7 @@ type Envelope struct {
 
 func Inspect(raw []byte, limit int) (Message, error) {
 	entity, err := message.Read(bytes.NewReader(raw))
-	if err != nil {
+	if !readableEntity(entity, err) {
 		return Message{}, ErrInput
 	}
 
@@ -52,7 +52,7 @@ func Inspect(raw []byte, limit int) (Message, error) {
 
 	subject, err := header.Subject()
 	if err != nil {
-		return Message{}, ErrInput
+		subject = header.Get("Subject")
 	}
 
 	msg := Message{
@@ -72,6 +72,11 @@ func Inspect(raw []byte, limit int) (Message, error) {
 	msg.Body, msg.Truncated = capBody(strings.ToValidUTF8(body.text, "\uFFFD"), limit)
 
 	return msg, nil
+}
+
+func readableEntity(entity *message.Entity, err error) bool {
+	return entity != nil &&
+		(err == nil || message.IsUnknownCharset(err) || message.IsUnknownEncoding(err))
 }
 
 func displayAddresses(header *mail.Header, name string) []string {
@@ -166,7 +171,7 @@ func readMultipart(parts message.MultipartReader, alternative bool, attachments 
 			break
 		}
 
-		if err != nil {
+		if !readableEntity(part, err) {
 			return bodyPart{}, ErrInput
 		}
 
@@ -391,7 +396,7 @@ func setRecipients(header *mail.Header, to, cc []string) ([]string, error) {
 
 func setReplyHeaders(header *mail.Header, raw []byte) error {
 	entity, err := message.Read(bytes.NewReader(raw))
-	if err != nil {
+	if !readableEntity(entity, err) {
 		return ErrInput
 	}
 
